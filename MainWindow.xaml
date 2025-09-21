@@ -16,7 +16,7 @@
         </Grid.RowDefinitions>
 
         <!-- Source Database Section -->
-        <GroupBox Grid.Row="0" Header="Source Database (Remote)" Margin="0,0,0,10" Padding="10">
+        <GroupBox Grid.Row="0" Header="Source Database" Margin="0,0,0,10" Padding="10">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="100"/>
@@ -47,7 +47,7 @@
         </GroupBox>
 
         <!-- Target Database Section -->
-        <GroupBox Grid.Row="1" Header="Target Database (Local)" Margin="0,0,0,10" Padding="10">
+        <GroupBox Grid.Row="1" Header="Target Database" Margin="0,0,0,10" Padding="10">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="100"/>
@@ -147,8 +147,11 @@
                     <Button Name="ManageConnectionsButton" Content="⚙️ Manage Connections"
                             Width="160" Height="30" Margin="0,0,10,0" Click="ManageConnectionsButton_Click"
                             ToolTip="Add, edit, or remove saved connections" Background="LightCyan"/>
+                    <Button Name="AnalyzeConnectionButton" Content="🔍 Analyze Target"
+                            Width="130" Height="30" Margin="0,0,10,0" Click="AnalyzeConnectionButton_Click"
+                            ToolTip="Analyze target connection (local vs remote detection)" Background="LightYellow"/>
                     <Button Name="OpenLogFileButton" Content="📂 Open Log File Location"
-                            Width="180" Height="30" Click="OpenLogFileButton_Click"
+                            Width="160" Height="30" Click="OpenLogFileButton_Click"
                             ToolTip="Open the folder containing the log file"/>
                 </StackPanel>
             </Grid>

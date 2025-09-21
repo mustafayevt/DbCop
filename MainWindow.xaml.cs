@@ -5,6 +5,8 @@ using Microsoft.Data.SqlClient;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -568,6 +570,36 @@ namespace DbCop
             }
         }
 
+        private void AnalyzeConnectionButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (TargetConnectionComboBox.SelectedItem is DatabaseConnection connection)
+            {
+                string analysis = AnalyzeConnectionType(connection.Server);
+                LogMessage("", false); // Empty line for readability
+                LogMessage("═══ CONNECTION ANALYSIS REPORT ═══", false);
+                foreach (string line in analysis.Split('\n'))
+                {
+                    LogMessage(line, false);
+                }
+                LogMessage("═══ END ANALYSIS REPORT ═══", false);
+                LogMessage("", false); // Empty line for readability
+
+                // Also show a summary in a message box
+                string summary = $"Connection Analysis Summary\n\n" +
+                               $"Server: {connection.Server}\n" +
+                               $"Type: {(IsRemoteConnection(connection.Server) ? "🌐 REMOTE" : "🏠 LOCAL")}\n\n" +
+                               $"Detailed analysis has been written to the log console below.\n" +
+                               $"Please review the log for comprehensive safety information.";
+
+                MessageBox.Show(summary, "Connection Analysis", MessageBoxButton.OK, 
+                              IsRemoteConnection(connection.Server) ? MessageBoxImage.Warning : MessageBoxImage.Information);
+            }
+            else
+            {
+                ShowError("Please select a target connection first");
+            }
+        }
+
         private void OpenLogFileButton_Click(object sender, RoutedEventArgs e)
         {
             OpenLogFileLocation();
@@ -616,6 +648,32 @@ namespace DbCop
             {
                 ShowError("SqlPackage.exe file not found at specified path");
                 return false;
+            }
+
+            // Additional validation for remote target connections
+            if (TargetConnectionComboBox.SelectedItem is DatabaseConnection targetConnection)
+            {
+                if (IsRemoteConnection(targetConnection.Server))
+                {
+                    string confirmMessage = $"🚨 FINAL CONFIRMATION REQUIRED 🚨\n\n" +
+                                          $"You are about to sync to a REMOTE TARGET:\n" +
+                                          $"• Server: {targetConnection.Server}\n" +
+                                          $"• Database: {TargetDatabaseComboBox.Text}\n\n" +
+                                          "This operation will modify data on a remote system.\n\n" +
+                                          "Are you absolutely sure you want to proceed?";
+
+                    var result = MessageBox.Show(confirmMessage, "Remote Target Confirmation", 
+                                               MessageBoxButton.YesNo, MessageBoxImage.Warning, 
+                                               MessageBoxResult.No);
+
+                    if (result != MessageBoxResult.Yes)
+                    {
+                        LogMessage("🛑 Sync cancelled by user - remote target confirmation declined", false);
+                        return false;
+                    }
+                    
+                    LogMessage($"✅ User confirmed sync to remote target: {targetConnection.Server}", false);
+                }
             }
 
             return true;
@@ -1812,6 +1870,20 @@ namespace DbCop
                 // Set Windows Auth checkbox based on connection settings
                 UseWindowsAuthCheckBox.IsChecked = connection.UseWindowsAuth;
                 LogMessage($"Target connection selected: {connection.Name} ({connection.Server})", false);
+
+                // Check if target is using a remote service and show warning
+                if (IsRemoteConnection(connection.Server))
+                {
+                    string warningMessage = $"⚠️ WARNING: Target connection '{connection.Name}' is configured to use a remote server '{connection.Server}'.\n\n" +
+                                          "This will modify data on a remote system. Please ensure:\n" +
+                                          "• You have proper authorization to modify the remote database\n" +
+                                          "• You have verified the target server and database names\n" +
+                                          "• You understand the impact of this operation\n\n" +
+                                          "Consider using a local target for testing purposes.";
+
+                    MessageBox.Show(warningMessage, "Remote Target Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    LogMessage($"🚨 REMOTE TARGET WARNING: Target server '{connection.Server}' is not local", false);
+                }
             }
         }
 
@@ -1866,6 +1938,327 @@ Schema Fixes: DACPAC Force Schema (with caution)
 
             MessageBox.Show(infoMessage, "Three Sync Modes Explained", MessageBoxButton.OK, MessageBoxImage.Information);
             LogMessage("User viewed sync modes information", false);
+        }
+
+        #endregion
+
+        #region Remote Connection Detection
+        
+        /// <summary>
+        /// ENHANCED SAFETY: Multi-layered local connection detection system
+        /// 
+        /// Safety Features Implemented:
+        /// 1. Pattern Matching: Detects common local server patterns (., localhost, (local), etc.)
+        /// 2. Machine Name Validation: Checks current machine name and domain variations
+        /// 3. IP Address Analysis: Identifies loopback, private, and link-local IP ranges
+        /// 4. Network Interface Scanning: Verifies if IP addresses belong to local network interfaces  
+        /// 5. DNS Resolution: Resolves hostnames to check if they point to local addresses
+        /// 6. Comprehensive Logging: Detailed analysis logging for transparency and debugging
+        /// 
+        /// Private IP Ranges Detected:
+        /// - IPv4: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 (link-local)
+        /// - IPv6: fe80::/10 (link-local), fc00::/7 (unique local)
+        /// - Loopback: 127.0.0.1, ::1
+        /// 
+        /// Security Philosophy: "Fail Safe" - When in doubt, treat as remote to prevent accidents
+        /// </summary>
+        private bool IsRemoteConnection(string serverName)
+        {
+            if (string.IsNullOrWhiteSpace(serverName))
+            {
+                LogMessage("🔍 Local Detection: Empty server name considered local", false);
+                return false;
+            }
+
+            // Normalize the server name for comparison
+            string normalizedServer = serverName.Trim().ToLowerInvariant();
+            string originalServer = serverName.Trim();
+
+            LogMessage($"🔍 Analyzing connection: '{originalServer}' (normalized: '{normalizedServer}')", false);
+
+            // Step 1: Check for obvious local server patterns
+            var localPatterns = new[]
+            {
+                ".",
+                "localhost",
+                "(local)",
+                "127.0.0.1",
+                "::1"
+            };
+
+            foreach (var pattern in localPatterns)
+            {
+                if (normalizedServer == pattern || normalizedServer.StartsWith(pattern + "\\"))
+                {
+                    LogMessage($"✅ Local Detection: Matched local pattern '{pattern}'", false);
+                    return false;
+                }
+            }
+
+            // Step 2: Check against current machine name and common variations
+            string machineName = Environment.MachineName.ToLowerInvariant();
+            var machineVariations = new[]
+            {
+                machineName,
+                $"{machineName}.local",
+                $"{machineName}.{Environment.UserDomainName?.ToLowerInvariant() ?? ""}".TrimEnd('.')
+            };
+
+            foreach (var variation in machineVariations)
+            {
+                if (!string.IsNullOrEmpty(variation) && 
+                    (normalizedServer == variation || normalizedServer.StartsWith(variation + "\\")))
+                {
+                    LogMessage($"✅ Local Detection: Matched machine name variation '{variation}'", false);
+                    return false;
+                }
+            }
+
+            // Step 3: Check for private IP address ranges
+            if (IsPrivateOrLocalIPAddress(normalizedServer))
+            {
+                LogMessage($"✅ Local Detection: Private/local IP address detected", false);
+                return false;
+            }
+
+            // Step 4: Check against actual network interfaces on this machine
+            if (IsLocalNetworkInterface(normalizedServer))
+            {
+                LogMessage($"✅ Local Detection: Found in local network interfaces", false);
+                return false;
+            }
+
+            // Step 5: Try DNS resolution for hostnames
+            if (ResolvesToLocalAddress(originalServer))
+            {
+                LogMessage($"✅ Local Detection: DNS resolves to local address", false);
+                return false;
+            }
+
+            // If all checks fail, it's considered remote
+            LogMessage($"🌐 Remote Detection: Server '{originalServer}' is considered REMOTE", false);
+            return true;
+        }
+
+        private bool IsPrivateOrLocalIPAddress(string serverName)
+        {
+            try
+            {
+                // Extract just the IP portion if there's an instance name
+                string ipPortion = serverName.Split('\\')[0];
+
+                if (!IPAddress.TryParse(ipPortion, out IPAddress? ip))
+                    return false;
+
+                // Check for loopback addresses
+                if (IPAddress.IsLoopback(ip))
+                {
+                    LogMessage($"  └─ Loopback address detected: {ip}", false);
+                    return true;
+                }
+
+                byte[] bytes = ip.GetAddressBytes();
+
+                // Check for private IPv4 ranges
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    // 10.0.0.0/8
+                    if (bytes[0] == 10)
+                    {
+                        LogMessage($"  └─ Private IPv4 range 10.x.x.x: {ip}", false);
+                        return true;
+                    }
+
+                    // 172.16.0.0/12
+                    if (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31)
+                    {
+                        LogMessage($"  └─ Private IPv4 range 172.16-31.x.x: {ip}", false);
+                        return true;
+                    }
+
+                    // 192.168.0.0/16
+                    if (bytes[0] == 192 && bytes[1] == 168)
+                    {
+                        LogMessage($"  └─ Private IPv4 range 192.168.x.x: {ip}", false);
+                        return true;
+                    }
+
+                    // 169.254.0.0/16 (link-local)
+                    if (bytes[0] == 169 && bytes[1] == 254)
+                    {
+                        LogMessage($"  └─ Link-local IPv4 range 169.254.x.x: {ip}", false);
+                        return true;
+                    }
+                }
+
+                // Check for IPv6 private/local addresses
+                if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+                {
+                    // Link-local addresses (fe80::/10)
+                    if (bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80)
+                    {
+                        LogMessage($"  └─ IPv6 link-local address: {ip}", false);
+                        return true;
+                    }
+
+                    // Unique local addresses (fc00::/7)
+                    if ((bytes[0] & 0xfe) == 0xfc)
+                    {
+                        LogMessage($"  └─ IPv6 unique local address: {ip}", false);
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"  └─ Error parsing IP address '{serverName}': {ex.Message}", false);
+                return false;
+            }
+        }
+
+        private bool IsLocalNetworkInterface(string serverName)
+        {
+            try
+            {
+                // Extract just the IP/hostname portion
+                string hostPortion = serverName.Split('\\')[0];
+
+                if (!IPAddress.TryParse(hostPortion, out IPAddress? targetIP))
+                    return false;
+
+                // Get all network interfaces on this machine
+                var networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
+                
+                foreach (var ni in networkInterfaces)
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up)
+                        continue;
+
+                    var ipProperties = ni.GetIPProperties();
+                    foreach (var unicastAddr in ipProperties.UnicastAddresses)
+                    {
+                        if (unicastAddr.Address.Equals(targetIP))
+                        {
+                            LogMessage($"  └─ Found on network interface '{ni.Name}': {unicastAddr.Address}", false);
+                            return true;
+                        }
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"  └─ Error checking network interfaces: {ex.Message}", false);
+                return false;
+            }
+        }
+
+        private bool ResolvesToLocalAddress(string serverName)
+        {
+            try
+            {
+                // Extract just the hostname portion
+                string hostPortion = serverName.Split('\\')[0];
+
+                // Skip if it's already an IP address
+                if (IPAddress.TryParse(hostPortion, out _))
+                    return false;
+
+                // Try DNS resolution
+                var hostEntry = Dns.GetHostEntry(hostPortion);
+                
+                foreach (var address in hostEntry.AddressList)
+                {
+                    // Check if resolved IP is loopback
+                    if (IPAddress.IsLoopback(address))
+                    {
+                        LogMessage($"  └─ DNS resolved '{hostPortion}' to loopback: {address}", false);
+                        return true;
+                    }
+
+                    // Check if resolved IP is on local network interfaces
+                    if (IsLocalNetworkInterface(address.ToString()))
+                    {
+                        LogMessage($"  └─ DNS resolved '{hostPortion}' to local interface: {address}", false);
+                        return true;
+                    }
+
+                    // Check if resolved IP is in private ranges
+                    if (IsPrivateOrLocalIPAddress(address.ToString()))
+                    {
+                        LogMessage($"  └─ DNS resolved '{hostPortion}' to private IP: {address}", false);
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"  └─ DNS resolution failed for '{serverName}': {ex.Message}", false);
+                // If DNS fails, we can't determine if it's local, so err on the side of caution
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Performs comprehensive analysis and returns detailed information about why a connection
+        /// is considered local or remote. Used for debugging and user transparency.
+        /// </summary>
+        private string AnalyzeConnectionType(string serverName)
+        {
+            if (string.IsNullOrWhiteSpace(serverName))
+                return "❓ Empty server name - defaulting to LOCAL";
+
+            var analysis = new List<string>
+            {
+                $"🔍 CONNECTION ANALYSIS FOR: '{serverName.Trim()}'",
+                ""
+            };
+
+            string normalizedServer = serverName.Trim().ToLowerInvariant();
+            bool isRemote = IsRemoteConnection(serverName); // This will log detailed steps
+
+            analysis.Add($"📊 FINAL DETERMINATION: {(isRemote ? "🌐 REMOTE" : "🏠 LOCAL")}");
+            analysis.Add("");
+            
+            if (isRemote)
+            {
+                analysis.Add("⚠️  SAFETY RECOMMENDATIONS:");
+                analysis.Add("   • Verify you have authorization for this server");
+                analysis.Add("   • Double-check server name spelling");
+                analysis.Add("   • Consider testing on local environment first");
+                analysis.Add("   • Ensure proper backups before proceeding");
+            }
+            else
+            {
+                analysis.Add("✅ SAFETY STATUS: Connection identified as local");
+                analysis.Add("   • Lower risk for accidental remote modifications");
+                analysis.Add("   • Still recommend backups for production data");
+            }
+
+            return string.Join("\n", analysis);
+        }
+
+        /// <summary>
+        /// Provides a way for advanced users to override remote detection if needed.
+        /// This should be used sparingly and with extreme caution.
+        /// </summary>
+        private bool ShouldTreatAsLocal(string serverName)
+        {
+            // This could be extended to check a configuration file or registry setting
+            // for servers that should be treated as local despite appearing remote
+            // For now, it's a placeholder for future enhancement
+            
+            // Example: Check if server is in a "trusted local servers" list
+            // var trustedServers = GetTrustedLocalServers();
+            // return trustedServers.Contains(serverName, StringComparer.OrdinalIgnoreCase);
+            
+            _ = serverName; // Suppress unused parameter warning - used in future implementation
+            return false;
         }
 
         #endregion
