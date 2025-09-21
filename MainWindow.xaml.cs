@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -93,8 +94,8 @@ namespace DbCop
             // Initialize common server names
             InitializeServerLists();
             
-            // Auto-detect SqlPackage on startup
-            FindAndSetSqlPackagePath();
+            // Auto-detect SqlPackage on startup (async to prevent UI blocking)
+            _ = FindAndSetSqlPackagePathAsync();
             
             // Load saved settings
             LoadSettings();
@@ -204,167 +205,222 @@ namespace DbCop
 
         #region SqlPackage Auto-Detection
 
-        private void FindAndSetSqlPackagePath()
+        private static readonly Dictionary<string, (string Path, DateTime CacheTime)> _sqlPackageCache = new();
+        private static readonly TimeSpan _cacheExpiry = TimeSpan.FromHours(24);
+
+        private async Task FindAndSetSqlPackagePathAsync()
         {
             try
             {
-                LogMessage("🔍 Searching for SqlPackage.exe...", false);
-
-                // Common SqlPackage.exe locations (ordered by preference - newer versions first)
-                var commonPaths = new List<string>
+                // Check cache first
+                string cacheKey = Environment.MachineName;
+                if (_sqlPackageCache.TryGetValue(cacheKey, out var cached) &&
+                    DateTime.Now - cached.CacheTime < _cacheExpiry &&
+                    File.Exists(cached.Path))
                 {
-                    // SQL Server 2022
-                    @"C:\Program Files\Microsoft SQL Server\160\DAC\bin\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft SQL Server\160\DAC\bin\SqlPackage.exe",
-
-                    // SQL Server 2019
-                    @"C:\Program Files\Microsoft SQL Server\150\DAC\bin\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft SQL Server\150\DAC\bin\SqlPackage.exe",
-
-                    // SQL Server 2017
-                    @"C:\Program Files\Microsoft SQL Server\140\DAC\bin\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft SQL Server\140\DAC\bin\SqlPackage.exe",
-
-                    // SQL Server 2016
-                    @"C:\Program Files\Microsoft SQL Server\130\DAC\bin\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft SQL Server\130\DAC\bin\SqlPackage.exe",
-
-                    // Visual Studio 2022 installations
-                    @"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-                    @"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-                    @"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-
-                    // Visual Studio 2019 installations
-                    @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-
-                    // Azure Data Studio
-                    @"C:\Program Files\Azure Data Studio\resources\app\extensions\mssql\sqltoolsservice\Windows\SqlPackage.exe",
-
-                    // .NET global tools
-                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dotnet\tools\sqlpackage.exe"),
-
-                    // SSMS installations
-                    @"C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
-                    @"C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe"
-                };
-
-                LogMessage($"Checking {commonPaths.Count} common locations...", false);
-
-                // First, check common paths
-                foreach (var path in commonPaths)
-                {
-                    LogMessage($"  Checking: {path}", false);
-                    if (File.Exists(path))
+                    Dispatcher.Invoke(() =>
                     {
-                        SqlPackagePathTextBox.Text = path;
-                        LogMessage($"✅ Auto-detected SqlPackage.exe at: {path}", false);
-
-                        // Test the executable
-                        try
-                        {
-                            var versionInfo = FileVersionInfo.GetVersionInfo(path);
-                            LogMessage($"   Version: {versionInfo.FileVersion}", false);
-                        }
-                        catch { }
-
-                        return;
-                    }
+                        SqlPackagePathTextBox.Text = cached.Path;
+                        LogMessage($"✅ Using cached SqlPackage.exe path: {cached.Path}", false);
+                    });
+                    return;
                 }
 
-                // If not found in common paths, do a more thorough search
-                LogMessage("⚠️ SqlPackage.exe not found in common locations. Performing deep search...", false);
-
-                var searchPaths = new List<string>
+                await Task.Run(async () =>
                 {
-                    @"C:\Program Files\Microsoft SQL Server",
-                    @"C:\Program Files (x86)\Microsoft SQL Server",
-                    @"C:\Program Files\Microsoft Visual Studio",
-                    @"C:\Program Files (x86)\Microsoft Visual Studio",
-                    @"C:\Program Files\Azure Data Studio"
-                };
+                    Dispatcher.Invoke(() => LogMessage("🔍 Searching for SqlPackage.exe...", false));
 
-                foreach (var searchPath in searchPaths)
-                {
-                    LogMessage($"  Deep searching: {searchPath}", false);
-                    if (Directory.Exists(searchPath))
+                    // Common SqlPackage.exe locations (ordered by preference - newer versions first)
+                    var commonPaths = new List<string>
+                    {
+                        // SQL Server 2022
+                        @"C:\Program Files\Microsoft SQL Server\160\DAC\bin\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft SQL Server\160\DAC\bin\SqlPackage.exe",
+
+                        // SQL Server 2019
+                        @"C:\Program Files\Microsoft SQL Server\150\DAC\bin\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft SQL Server\150\DAC\bin\SqlPackage.exe",
+
+                        // SQL Server 2017
+                        @"C:\Program Files\Microsoft SQL Server\140\DAC\bin\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft SQL Server\140\DAC\bin\SqlPackage.exe",
+
+                        // SQL Server 2016
+                        @"C:\Program Files\Microsoft SQL Server\130\DAC\bin\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft SQL Server\130\DAC\bin\SqlPackage.exe",
+
+                        // Visual Studio 2022 installations
+                        @"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+                        @"C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+                        @"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+
+                        // Visual Studio 2019 installations
+                        @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Professional\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+
+                        // Azure Data Studio
+                        @"C:\Program Files\Azure Data Studio\resources\app\extensions\mssql\sqltoolsservice\Windows\SqlPackage.exe",
+
+                        // .NET global tools
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".dotnet\tools\sqlpackage.exe"),
+
+                        // SSMS installations
+                        @"C:\Program Files (x86)\Microsoft SQL Server Management Studio 19\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe",
+                        @"C:\Program Files (x86)\Microsoft SQL Server Management Studio 18\Common7\IDE\Extensions\Microsoft\SQLDB\DAC\SqlPackage.exe"
+                    };
+
+                    Dispatcher.Invoke(() => LogMessage($"Checking {commonPaths.Count} common locations...", false));
+
+                    // First, check common paths in parallel for better performance
+                    var validPaths = await Task.Run(() =>
+                        commonPaths.AsParallel()
+                            .Where(File.Exists)
+                            .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                            .ToList()
+                    );
+
+                    if (validPaths.Any())
+                    {
+                        string selectedPath = validPaths.First();
+                        Dispatcher.Invoke(() =>
+                        {
+                            SqlPackagePathTextBox.Text = selectedPath;
+                            LogMessage($"✅ Auto-detected SqlPackage.exe at: {selectedPath}", false);
+
+                            // Test the executable
+                            try
+                            {
+                                var versionInfo = FileVersionInfo.GetVersionInfo(selectedPath);
+                                LogMessage($"   Version: {versionInfo.FileVersion}", false);
+                            }
+                            catch { }
+                        });
+
+                        // Cache the result
+                        _sqlPackageCache[cacheKey] = (selectedPath, DateTime.Now);
+                        return;
+                    }
+
+                    // If not found in common paths, do a more thorough search
+                    Dispatcher.Invoke(() => LogMessage("⚠️ SqlPackage.exe not found in common locations. Performing optimized search...", false));
+
+                    var searchPaths = new List<string>
+                    {
+                        @"C:\Program Files\Microsoft SQL Server",
+                        @"C:\Program Files (x86)\Microsoft SQL Server",
+                        @"C:\Program Files\Microsoft Visual Studio",
+                        @"C:\Program Files (x86)\Microsoft Visual Studio",
+                        @"C:\Program Files\Azure Data Studio"
+                    };
+
+                    // Search directories in parallel with cancellation for early termination
+                    using var cts = new CancellationTokenSource();
+                    var searchTasks = searchPaths.Where(Directory.Exists).Select(async searchPath =>
                     {
                         try
                         {
-                            var foundFiles = Directory.GetFiles(searchPath, "SqlPackage.exe", SearchOption.AllDirectories)
-                                .OrderByDescending(f => new FileInfo(f).LastWriteTime)
-                                .ToList();
-
-                            LogMessage($"    Found {foundFiles.Count} instances", false);
-
-                            if (foundFiles.Any())
+                            return await Task.Run(() =>
                             {
-                                string selectedPath = foundFiles.First();
-                                SqlPackagePathTextBox.Text = selectedPath;
-                                LogMessage($"✅ Found SqlPackage.exe at: {selectedPath}", false);
+                                var foundFiles = Directory.GetFiles(searchPath, "SqlPackage.exe", SearchOption.AllDirectories)
+                                    .OrderByDescending(f => new FileInfo(f).LastWriteTime)
+                                    .ToList();
 
-                                // Test the executable
-                                try
-                                {
-                                    var versionInfo = FileVersionInfo.GetVersionInfo(selectedPath);
-                                    LogMessage($"   Version: {versionInfo.FileVersion}", false);
-                                }
-                                catch { }
-
-                                return;
-                            }
+                                Dispatcher.Invoke(() => LogMessage($"  Found {foundFiles.Count} instances in {searchPath}", false));
+                                return foundFiles;
+                            }, cts.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            return new List<string>();
                         }
                         catch (Exception searchEx)
                         {
-                            LogMessage($"    Error searching {searchPath}: {searchEx.Message}", false);
+                            Dispatcher.Invoke(() => LogMessage($"  Error searching {searchPath}: {searchEx.Message}", false));
+                            return new List<string>();
                         }
-                    }
-                    else
-                    {
-                        LogMessage($"    Directory does not exist: {searchPath}", false);
-                    }
-                }
+                    });
 
-                // Check PATH environment variable
-                LogMessage("Checking PATH environment variable...", false);
-                string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
-                var pathDirectories = pathEnv.Split(';', StringSplitOptions.RemoveEmptyEntries);
+                    var allResults = await Task.WhenAll(searchTasks);
+                    var allFoundFiles = allResults.SelectMany(x => x).OrderByDescending(f => new FileInfo(f).LastWriteTime).ToList();
 
-                foreach (var pathDir in pathDirectories)
-                {
-                    try
+                    if (allFoundFiles.Any())
                     {
-                        string sqlPackageInPath = Path.Combine(pathDir.Trim(), "SqlPackage.exe");
-                        if (File.Exists(sqlPackageInPath))
+                        string selectedPath = allFoundFiles.First();
+                        Dispatcher.Invoke(() =>
                         {
-                            SqlPackagePathTextBox.Text = sqlPackageInPath;
-                            LogMessage($"✅ Found SqlPackage.exe in PATH: {sqlPackageInPath}", false);
-                            return;
-                        }
+                            SqlPackagePathTextBox.Text = selectedPath;
+                            LogMessage($"✅ Found SqlPackage.exe at: {selectedPath}", false);
+
+                            // Test the executable
+                            try
+                            {
+                                var versionInfo = FileVersionInfo.GetVersionInfo(selectedPath);
+                                LogMessage($"   Version: {versionInfo.FileVersion}", false);
+                            }
+                            catch { }
+                        });
+
+                        // Cache the result
+                        _sqlPackageCache[cacheKey] = (selectedPath, DateTime.Now);
+                        return;
                     }
-                    catch { }
-                }
 
-                // If still not found, provide detailed guidance
-                LogMessage("❌ SqlPackage.exe not found anywhere on this system.", true);
-                LogMessage("", false);
-                LogMessage("💡 Installation options:", false);
-                LogMessage("   1. Install SQL Server Management Studio (SSMS) - includes SqlPackage.exe", false);
-                LogMessage("   2. Install Visual Studio with SQL Server Data Tools", false);
-                LogMessage("   3. Install via .NET CLI: dotnet tool install -g Microsoft.SqlPackage", false);
-                LogMessage("   4. Download standalone DacFramework from Microsoft", false);
-                LogMessage("", false);
-                LogMessage("🔗 Download links:", false);
-                LogMessage("   SSMS: https://docs.microsoft.com/en-us/sql/ssms/download-sql-server-management-studio-ssms", false);
-                LogMessage("   DacFramework: https://www.microsoft.com/en-us/download/details.aspx?id=58207", false);
+                    // Check PATH environment variable
+                    Dispatcher.Invoke(() => LogMessage("Checking PATH environment variable...", false));
+                    string pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
+                    var pathDirectories = pathEnv.Split(';', StringSplitOptions.RemoveEmptyEntries);
 
+                    var pathResult = await Task.Run(() =>
+                        pathDirectories.AsParallel()
+                            .Select(pathDir => Path.Combine(pathDir.Trim(), "SqlPackage.exe"))
+                            .FirstOrDefault(File.Exists)
+                    );
+
+                    if (!string.IsNullOrEmpty(pathResult))
+                    {
+                        Dispatcher.Invoke(() =>
+                        {
+                            SqlPackagePathTextBox.Text = pathResult;
+                            LogMessage($"✅ Found SqlPackage.exe in PATH: {pathResult}", false);
+                        });
+
+                        // Cache the result
+                        _sqlPackageCache[cacheKey] = (pathResult, DateTime.Now);
+                        return;
+                    }
+
+                    // If still not found, provide detailed guidance
+                    Dispatcher.Invoke(() =>
+                    {
+                        LogMessage("❌ SqlPackage.exe not found anywhere on this system.", true);
+                        LogMessage("", false);
+                        LogMessage("💡 Installation options:", false);
+                        LogMessage("   1. Install SQL Server Management Studio (SSMS) - includes SqlPackage.exe", false);
+                        LogMessage("   2. Install Visual Studio with SQL Server Data Tools", false);
+                        LogMessage("   3. Install via .NET CLI: dotnet tool install -g Microsoft.SqlPackage", false);
+                        LogMessage("   4. Download standalone DacFramework from Microsoft", false);
+                        LogMessage("", false);
+                        LogMessage("🔗 Download links:", false);
+                        LogMessage("   SSMS: https://docs.microsoft.com/en-us/sql/ssms/download-sql-server-management-studio-ssms", false);
+                        LogMessage("   DacFramework: https://www.microsoft.com/en-us/download/details.aspx?id=58207", false);
+                    });
+                });
             }
             catch (Exception ex)
             {
-                LogMessage($"❌ Error during SqlPackage.exe auto-detection: {ex.Message}", true);
-                LogMessage($"Stack trace: {ex.StackTrace}", false);
+                Dispatcher.Invoke(() =>
+                {
+                    LogMessage($"❌ Error during SqlPackage.exe auto-detection: {ex.Message}", true);
+                    LogMessage($"Stack trace: {ex.StackTrace}", false);
+                });
             }
+        }
+
+        private void FindAndSetSqlPackagePath()
+        {
+            // Synchronous wrapper for backward compatibility
+            _ = FindAndSetSqlPackagePathAsync();
         }
 
         #endregion
