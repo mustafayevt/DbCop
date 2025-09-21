@@ -78,6 +78,7 @@ namespace DbCop
         private readonly string _logFilePath;
         private readonly string _connectionsFilePath;
         private List<DatabaseConnection> _savedConnections = new();
+        private CancellationTokenSource? _syncCancellationTokenSource;
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -518,7 +519,9 @@ namespace DbCop
         {
             if (_isSyncing)
             {
-                LogMessage("Sync operation is already in progress", true);
+                // If already syncing, this becomes a cancel button
+                LogMessage("🛑 Cancelling sync operation...", false);
+                _syncCancellationTokenSource?.Cancel();
                 return;
             }
 
@@ -528,20 +531,38 @@ namespace DbCop
             }
 
             _isSyncing = true;
-            StartSyncButton.IsEnabled = false;
+            _syncCancellationTokenSource = new CancellationTokenSource();
+
+            // Update UI to show cancel option
+            StartSyncButton.Content = "🛑 Cancel Sync";
+            StartSyncButton.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.LightCoral);
             SyncProgressBar.Value = 0;
             StatusBarText.Text = "Starting sync...";
 
             try
             {
-                await PerformDatabaseSync();
+                await PerformDatabaseSync(_syncCancellationTokenSource.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                LogMessage("🛑 Sync operation cancelled by user", false);
+                StatusBarText.Text = "Sync cancelled";
             }
             finally
             {
                 _isSyncing = false;
-                StartSyncButton.IsEnabled = true;
+                _syncCancellationTokenSource?.Dispose();
+                _syncCancellationTokenSource = null;
+
+                // Restore UI
+                StartSyncButton.Content = "🚀 Start Sync";
+                StartSyncButton.Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Colors.LightBlue);
                 SyncProgressBar.Value = 0;
-                StatusBarText.Text = "Ready";
+
+                if (StatusBarText.Text != "Sync cancelled")
+                {
+                    StatusBarText.Text = "Ready";
+                }
             }
         }
 
@@ -772,7 +793,7 @@ namespace DbCop
 
         #region Database Sync Logic
 
-        private async Task PerformDatabaseSync()
+        private async Task PerformDatabaseSync(CancellationToken cancellationToken = default)
         {
             try
             {
@@ -783,8 +804,14 @@ namespace DbCop
                 LogMessage($"Temporary DACPAC file: {_tempDacpacPath}", false);
 
                 // Pre-flight checks
+                Dispatcher.Invoke(() => {
+                    SyncProgressBar.Value = 5;
+                    StatusBarText.Text = "Performing pre-flight checks...";
+                });
                 LogMessage("🔍 Performing pre-flight checks...", false);
-                
+
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // Test source connection first
                 LogMessage("Testing source database connection...", false);
                 bool sourceConnected = await TestSourceConnection();
@@ -792,7 +819,9 @@ namespace DbCop
                 {
                     throw new Exception("Cannot connect to source database. Please check your source connection settings.");
                 }
-                
+
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // Test target server connection (to master database)
                 LogMessage("Testing target server connection...", false);
                 bool targetServerConnected = await TestTargetServerConnection();
@@ -800,6 +829,8 @@ namespace DbCop
                 {
                     throw new Exception("Cannot connect to target server. Please check your target server connection settings.");
                 }
+
+                cancellationToken.ThrowIfCancellationRequested();
 
                 // Create target database if it doesn't exist
                 LogMessage("Ensuring target database exists...", false);
@@ -812,38 +843,53 @@ namespace DbCop
                 LogMessage("✅ All pre-flight checks passed", false);
 
                 // Step 1: Extract source database to DACPAC
-                SyncProgressBar.Value = 10;
-                StatusBarText.Text = "Extracting source database...";
+                Dispatcher.Invoke(() => {
+                    SyncProgressBar.Value = 10;
+                    StatusBarText.Text = "Extracting source database...";
+                });
                 LogMessage("Step 1: Extracting source database to DACPAC file...", false);
 
-                bool extractSuccess = await ExecuteSqlPackageCommand(BuildExtractCommand());
+                bool extractSuccess = await ExecuteSqlPackageCommand(BuildExtractCommand(), cancellationToken);
                 if (!extractSuccess)
                 {
                     throw new Exception("Database extraction failed. Check the error messages above for details.");
                 }
 
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // Step 2: Publish DACPAC to target database
-                SyncProgressBar.Value = 60;
-                StatusBarText.Text = "Publishing to target database...";
+                Dispatcher.Invoke(() => {
+                    SyncProgressBar.Value = 60;
+                    StatusBarText.Text = "Publishing to target database...";
+                });
                 LogMessage("Step 2: Publishing DACPAC to target database...", false);
 
-                bool publishSuccess = await ExecuteSqlPackageCommand(BuildPublishCommand());
+                bool publishSuccess = await ExecuteSqlPackageCommand(BuildPublishCommand(), cancellationToken);
                 if (!publishSuccess)
                 {
                     throw new Exception("Database publish failed");
                 }
 
-                SyncProgressBar.Value = 100;
-                StatusBarText.Text = "Sync completed successfully";
+                Dispatcher.Invoke(() => {
+                    SyncProgressBar.Value = 100;
+                    StatusBarText.Text = "Sync completed successfully";
+                });
                 LogMessage("=== Database Synchronization Completed Successfully ===", false);
-                
-                MessageBox.Show("Database synchronization completed successfully!", "Success", 
-                    MessageBoxButton.OK, MessageBoxImage.Information);
+
+                Dispatcher.Invoke(() => {
+                    MessageBox.Show("Database synchronization completed successfully!", "Success",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                });
+            }
+            catch (OperationCanceledException)
+            {
+                LogMessage("🛑 Database synchronization cancelled", false);
+                throw; // Re-throw to be handled by caller
             }
             catch (Exception ex)
             {
                 LogMessage($"ERROR: {ex.Message}", true);
-                ShowError($"Database synchronization failed: {ex.Message}");
+                Dispatcher.Invoke(() => ShowError($"Database synchronization failed: {ex.Message}"));
             }
             finally
             {
@@ -943,57 +989,68 @@ namespace DbCop
             return command;
         }
 
-        private async Task<bool> ExecuteSqlPackageCommand(string arguments)
+        private async Task<bool> ExecuteSqlPackageCommand(string arguments, CancellationToken cancellationToken = default)
         {
-            return await Task.Run(() =>
+            string sqlPackagePath = "";
+            await Dispatcher.InvokeAsync(() => sqlPackagePath = SqlPackagePathTextBox.Text);
+
+            // Validate SqlPackage.exe path
+            if (string.IsNullOrEmpty(sqlPackagePath) || !File.Exists(sqlPackagePath))
+            {
+                await Dispatcher.InvokeAsync(() => LogMessage($"ERROR: SqlPackage.exe not found at: {sqlPackagePath}", true));
+                return false;
+            }
+
+            await Dispatcher.InvokeAsync(() => LogMessage($"Executing: {Path.GetFileName(sqlPackagePath)}", false));
+            await Dispatcher.InvokeAsync(() => LogMessage($"Working Directory: {Path.GetDirectoryName(_tempDacpacPath)}", false));
+            await Dispatcher.InvokeAsync(() => LogMessage($"🔧 Command Arguments: {arguments}", false));
+
+            var processInfo = new ProcessStartInfo
+            {
+                FileName = sqlPackagePath,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(_tempDacpacPath)
+            };
+
+            var outputBuffer = new List<string>();
+            var errorBuffer = new List<string>();
+            var lastUiUpdate = DateTime.Now;
+
+            using (var process = new Process { StartInfo = processInfo })
             {
                 try
                 {
-                    string sqlPackagePath = "";
-                    Dispatcher.Invoke(() => sqlPackagePath = SqlPackagePathTextBox.Text);
-
-                    // Validate SqlPackage.exe path
-                    if (string.IsNullOrEmpty(sqlPackagePath) || !File.Exists(sqlPackagePath))
+                    // Set up cancellation to kill the process
+                    using (cancellationToken.Register(() =>
                     {
-                        Dispatcher.Invoke(() => LogMessage($"ERROR: SqlPackage.exe not found at: {sqlPackagePath}", true));
-                        return false;
-                    }
-
-                    Dispatcher.Invoke(() => LogMessage($"Executing: {Path.GetFileName(sqlPackagePath)}", false));
-                    Dispatcher.Invoke(() => LogMessage($"Working Directory: {Path.GetDirectoryName(_tempDacpacPath)}", false));
-                    Dispatcher.Invoke(() => LogMessage($"🔧 Command Arguments: {arguments}", false));
-
-                    var processInfo = new ProcessStartInfo
-                    {
-                        FileName = sqlPackagePath,
-                        Arguments = arguments,
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true,
-                        WorkingDirectory = Path.GetDirectoryName(_tempDacpacPath)
-                    };
-
-                    var outputLines = new List<string>();
-                    var errorLines = new List<string>();
-
-                    using (var process = Process.Start(processInfo))
-                    {
-                        if (process == null)
+                        try
                         {
-                            Dispatcher.Invoke(() => LogMessage("❌ Failed to start SqlPackage.exe process", true));
-                            return false;
+                            if (!process.HasExited)
+                            {
+                                process.Kill();
+                                Dispatcher.InvokeAsync(() => LogMessage("🛑 SqlPackage process killed due to cancellation", false));
+                            }
                         }
+                        catch { }
+                    }))
+                    {
+                        process.Start();
 
-                        Dispatcher.Invoke(() => LogMessage($"⚡ SqlPackage.exe process started (PID: {process.Id})", false));
+                        await Dispatcher.InvokeAsync(() => LogMessage($"⚡ SqlPackage.exe process started (PID: {process.Id})", false));
 
-                        // Read output in real-time
+                        // Read output in real-time with batching for UI performance
                         process.OutputDataReceived += (sender, e) =>
                         {
                             if (!string.IsNullOrEmpty(e.Data))
                             {
-                                outputLines.Add(e.Data);
-                                Dispatcher.Invoke(() => LogMessage($"OUT: {e.Data}", false));
+                                lock (outputBuffer)
+                                {
+                                    outputBuffer.Add(e.Data);
+                                }
                             }
                         };
 
@@ -1001,22 +1058,89 @@ namespace DbCop
                         {
                             if (!string.IsNullOrEmpty(e.Data))
                             {
-                                errorLines.Add(e.Data);
-                                Dispatcher.Invoke(() => LogMessage($"ERR: {e.Data}", true));
+                                lock (errorBuffer)
+                                {
+                                    errorBuffer.Add(e.Data);
+                                }
                             }
                         };
 
                         process.BeginOutputReadLine();
                         process.BeginErrorReadLine();
 
-                        process.WaitForExit();
+                        // Periodically update UI with batched messages to prevent freezing
+                        var uiUpdateTask = Task.Run(async () =>
+                        {
+                            while (!process.HasExited && !cancellationToken.IsCancellationRequested)
+                            {
+                                await Task.Delay(500, cancellationToken); // Update every 500ms
+
+                                List<string> outputToShow, errorsToShow;
+                                lock (outputBuffer)
+                                {
+                                    outputToShow = new List<string>(outputBuffer);
+                                    outputBuffer.Clear();
+                                }
+                                lock (errorBuffer)
+                                {
+                                    errorsToShow = new List<string>(errorBuffer);
+                                    errorBuffer.Clear();
+                                }
+
+                                if (outputToShow.Any() || errorsToShow.Any())
+                                {
+                                    await Dispatcher.InvokeAsync(() =>
+                                    {
+                                        foreach (var output in outputToShow)
+                                            LogMessage($"OUT: {output}", false);
+                                        foreach (var error in errorsToShow)
+                                            LogMessage($"ERR: {error}", true);
+                                    });
+                                }
+                            }
+                        }, cancellationToken);
+
+                        // Wait for process completion with cancellation support
+                        await Task.Run(() =>
+                        {
+                            while (!process.WaitForExit(1000))
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                            }
+                        }, cancellationToken);
+
+                        // Wait for UI updates to complete
+                        try
+                        {
+                            await uiUpdateTask;
+                        }
+                        catch (OperationCanceledException) { }
+
+                        // Final UI update with any remaining messages
+                        List<string> finalOutput, finalErrors;
+                        lock (outputBuffer)
+                        {
+                            finalOutput = new List<string>(outputBuffer);
+                            outputBuffer.Clear();
+                        }
+                        lock (errorBuffer)
+                        {
+                            finalErrors = new List<string>(errorBuffer);
+                            errorBuffer.Clear();
+                        }
 
                         bool success = process.ExitCode == 0;
-                        
-                        Dispatcher.Invoke(() => 
+
+                        await Dispatcher.InvokeAsync(() =>
                         {
-                            LogMessage($"⏱️ Process completed in {DateTime.Now:HH:mm:ss}", false);
-                            
+                            // Show any remaining messages
+                            foreach (var output in finalOutput)
+                                LogMessage($"OUT: {output}", false);
+                            foreach (var error in finalErrors)
+                                LogMessage($"ERR: {error}", true);
+
+                            LogMessage($"⏱️ Process completed at {DateTime.Now:HH:mm:ss}", false);
+
                             if (success)
                             {
                                 LogMessage($"✅ SqlPackage.exe completed successfully (Exit Code: {process.ExitCode})", false);
@@ -1034,11 +1158,11 @@ namespace DbCop
                                 LogMessage("• Verify username and password", false);
                                 LogMessage("• Ensure database exists and is accessible", false);
                                 LogMessage("• Check SQL Server is running and accepting connections", false);
-                                
-                                if (errorLines.Any())
+
+                                if (finalErrors.Any())
                                 {
                                     LogMessage("Error details:", true);
-                                    foreach (var error in errorLines.Take(5))
+                                    foreach (var error in finalErrors.Take(5))
                                     {
                                         LogMessage($"  {error}", true);
                                     }
@@ -1049,16 +1173,21 @@ namespace DbCop
                         return success;
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    await Dispatcher.InvokeAsync(() => LogMessage("🛑 SqlPackage operation cancelled", false));
+                    throw;
+                }
                 catch (Exception ex)
                 {
-                    Dispatcher.Invoke(() => 
+                    await Dispatcher.InvokeAsync(() =>
                     {
                         LogMessage($"❌ Exception executing SqlPackage.exe: {ex.Message}", true);
                         LogMessage($"Stack trace: {ex.StackTrace}", false);
                     });
                     return false;
                 }
-            });
+            }
         }
 
         #endregion
