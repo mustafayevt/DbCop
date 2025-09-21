@@ -1,0 +1,155 @@
+<Window x:Class="DbCop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DbCop - Database Sync Tool" Height="750" Width="900"
+        MinWidth="850" MinHeight="700"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Source Database Section -->
+        <GroupBox Grid.Row="0" Header="Source Database (Remote)" Margin="0,0,0,10" Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="40"/>
+                    <ColumnDefinition Width="40"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="35"/>
+                    <RowDefinition Height="35"/>
+                </Grid.RowDefinitions>
+
+                <Label Grid.Row="0" Grid.Column="0" Content="Connection:" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1" Name="SourceConnectionComboBox"
+                          Margin="0,0,5,0" Height="25" VerticalContentAlignment="Center"
+                          SelectionChanged="OnSourceConnectionSelected"/>
+                <Button Grid.Row="0" Grid.Column="2" Name="TestSourceConnectionButton" Content="✓"
+                        Width="35" Height="25" ToolTip="Test connection" Background="LightGreen"
+                        Click="TestSourceConnectionButton_Click"/>
+
+                <Label Grid.Row="1" Grid.Column="0" Content="Database:" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="1" Grid.Column="1" Name="SourceDatabaseComboBox" IsEditable="True"
+                          Margin="0,0,5,0" Height="25" VerticalContentAlignment="Center"/>
+                <Button Grid.Row="1" Grid.Column="2" Name="LoadSourceDatabasesButton" Content="🔄"
+                        Width="35" Height="25" ToolTip="Load databases from selected server"
+                        Click="LoadSourceDatabasesButton_Click"/>
+            </Grid>
+        </GroupBox>
+
+        <!-- Target Database Section -->
+        <GroupBox Grid.Row="1" Header="Target Database (Local)" Margin="0,0,0,10" Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="100"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="40"/>
+                    <ColumnDefinition Width="40"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="35"/>
+                    <RowDefinition Height="35"/>
+                    <RowDefinition Height="35"/>
+                    <RowDefinition Height="35"/>
+                </Grid.RowDefinitions>
+
+                <Label Grid.Row="0" Grid.Column="0" Content="Connection:" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1" Name="TargetConnectionComboBox"
+                          Margin="0,0,5,0" Height="25" VerticalContentAlignment="Center"
+                          SelectionChanged="OnTargetConnectionSelected"/>
+                <Button Grid.Row="0" Grid.Column="2" Name="TestTargetConnectionButton" Content="✓"
+                        Width="35" Height="25" ToolTip="Test connection" Background="LightGreen"
+                        Click="TestTargetConnectionButton_Click"/>
+
+                <Label Grid.Row="1" Grid.Column="0" Content="Database:" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="1" Grid.Column="1" Name="TargetDatabaseComboBox" IsEditable="True"
+                          Margin="0,0,5,0" Height="25" VerticalContentAlignment="Center"/>
+                <Button Grid.Row="1" Grid.Column="2" Name="LoadTargetDatabasesButton" Content="🔄"
+                        Width="35" Height="25" ToolTip="Load databases from selected server"
+                        Click="LoadTargetDatabasesButton_Click"/>
+
+                <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Name="UseWindowsAuthCheckBox"
+                          Content="🔐 Windows Auth (from selected connection)" VerticalAlignment="Center" IsEnabled="False"
+                          Checked="UseWindowsAuthCheckBox_Checked" Unchecked="UseWindowsAuthCheckBox_Unchecked"/>
+
+                <CheckBox Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="4" Name="DropTargetDatabaseCheckBox"
+                          Content="🗑️ Drop target database if exists (recreate from scratch)" VerticalAlignment="Center"
+                          ToolTip="Drop and recreate the target database for a clean sync" IsChecked="True"/>
+            </Grid>
+        </GroupBox>
+
+        <!-- Tool Path Section -->
+        <GroupBox Grid.Row="2" Header="SqlPackage Tool Path" Margin="0,0,0,10" Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="80"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBox Grid.Column="0" Name="SqlPackagePathTextBox" Margin="0,0,10,0"
+                         Height="30" VerticalContentAlignment="Center" IsReadOnly="True"/>
+                <Button Grid.Column="1" Name="BrowseButton" Content="📁 Browse..."
+                        Height="30" Margin="0,0,10,0" Click="BrowseButton_Click"/>
+                <Button Grid.Column="2" Name="AutoDetectButton" Content="🔍 Auto"
+                        Height="30" Click="AutoDetectButton_Click" ToolTip="Auto-detect SqlPackage.exe"/>
+            </Grid>
+        </GroupBox>
+
+        <!-- Action Button -->
+        <Button Grid.Row="3" Name="StartSyncButton" Content="🚀 Start Sync" Height="40" Width="140"
+                HorizontalAlignment="Center" Margin="0,0,0,15" Click="StartSyncButton_Click"
+                FontWeight="Bold" FontSize="14" Background="LightBlue"/>
+
+        <!-- Options Section -->
+        <GroupBox Grid.Row="4" Header="Options" Margin="0,0,0,10" Padding="10" Height="70">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="180"/>
+                    <ColumnDefinition Width="220"/>
+                </Grid.ColumnDefinitions>
+
+                <CheckBox Grid.Column="0" Name="AutoScrollLogCheckBox" Content="📜 Auto-scroll log"
+                          VerticalAlignment="Center" IsChecked="True" FontSize="12"
+                          ToolTip="Automatically scroll to the bottom of the log"/>
+
+                <Button Grid.Column="1" Name="ManageConnectionsButton" Content="⚙️ Manage Connections"
+                        Height="30" Margin="0,0,10,0" Click="ManageConnectionsButton_Click"
+                        ToolTip="Add, edit, or remove saved connections" Background="LightCyan"/>
+
+                <Button Grid.Column="2" Name="OpenLogFileButton" Content="📂 Open Log File Location"
+                        Height="30" Click="OpenLogFileButton_Click"
+                        ToolTip="Open the folder containing the log file"/>
+            </Grid>
+        </GroupBox>
+
+        <!-- Log Console -->
+        <GroupBox Grid.Row="5" Header="Log Console" Margin="0,0,0,10" Padding="10">
+            <ScrollViewer Name="StatusScrollViewer" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Auto">
+                <TextBlock Name="StatusTextBlock" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11"
+                          Background="Black" Foreground="LightGreen" Padding="5"/>
+            </ScrollViewer>
+        </GroupBox>
+
+        <!-- Progress Bar -->
+        <StatusBar Grid.Row="6" Height="30">
+            <StatusBarItem>
+                <ProgressBar Name="SyncProgressBar" Width="200" Height="20" Minimum="0" Maximum="100"/>
+            </StatusBarItem>
+            <StatusBarItem>
+                <TextBlock Name="StatusBarText" Text="Ready" Margin="10,0,0,0" VerticalAlignment="Center"/>
+            </StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window>
