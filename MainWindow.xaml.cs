@@ -75,6 +75,7 @@ namespace DbCop
     {
         private bool _isSyncing = false;
         private readonly string _tempDacpacPath;
+        private readonly string _tempBacpacPath;
         private readonly string _logFilePath;
         private readonly string _connectionsFilePath;
         private List<DatabaseConnection> _savedConnections = new();
@@ -86,6 +87,7 @@ namespace DbCop
         {
             InitializeComponent();
             _tempDacpacPath = Path.Combine(Path.GetTempPath(), $"DatabaseSync_{Guid.NewGuid():N}.dacpac");
+            _tempBacpacPath = Path.Combine(Path.GetTempPath(), $"DatabaseSync_{Guid.NewGuid():N}.bacpac");
             _logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, $"DatabaseSync_Log_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
             _connectionsFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SavedConnections.json");
             
@@ -702,9 +704,11 @@ namespace DbCop
                 string masterConnectionString = BuildTargetServerConnectionString();
                 bool shouldDropDatabase = false;
 
+                // Determine if we should drop database based on sync mode
                 Dispatcher.Invoke(() =>
                 {
-                    shouldDropDatabase = DropTargetDatabaseCheckBox.IsChecked ?? false;
+                    // Only drop database for BACPAC Full Copy mode
+                    shouldDropDatabase = BacpacFullCopyRadio?.IsChecked == true;
                 });
 
                 using (var connection = new SqlConnection(masterConnectionString))
@@ -718,24 +722,61 @@ namespace DbCop
                         checkCmd.Parameters.AddWithValue("@dbName", targetDatabaseName);
                         int dbCount = (int)await checkCmd.ExecuteScalarAsync();
 
-                        if (dbCount > 0 && shouldDropDatabase)
+                        if (dbCount > 0)
                         {
-                            LogMessage($"🗑️ Dropping existing target database '{targetDatabaseName}'...", false);
-
-                            // Drop the database
-                            string dropDbQuery = $"DROP DATABASE [{targetDatabaseName}]";
-                            using (var dropCmd = new SqlCommand(dropDbQuery, connection))
+                            if (shouldDropDatabase)
                             {
-                                await dropCmd.ExecuteNonQueryAsync();
-                            }
+                                LogMessage($"🗑️ BACPAC FULL COPY: Dropping existing target database '{targetDatabaseName}'...", false);
 
-                            LogMessage($"✅ Target database '{targetDatabaseName}' dropped successfully", false);
-                            dbCount = 0; // Mark as non-existent so it gets created below
+                                // First, terminate all connections to the database
+                                LogMessage($"🔌 Terminating active connections to database '{targetDatabaseName}'...", false);
+
+                                string killConnectionsQuery = @"
+                                    DECLARE @sql NVARCHAR(MAX) = ''
+                                    SELECT @sql = @sql + 'KILL ' + CAST(session_id AS NVARCHAR(10)) + '; '
+                                    FROM sys.dm_exec_sessions
+                                    WHERE database_id = DB_ID(@dbName)
+                                    AND session_id != @@SPID
+                                    EXEC sp_executesql @sql";
+
+                                try
+                                {
+                                    using (var killCmd = new SqlCommand(killConnectionsQuery, connection))
+                                    {
+                                        killCmd.Parameters.AddWithValue("@dbName", targetDatabaseName);
+                                        await killCmd.ExecuteNonQueryAsync();
+                                    }
+                                    LogMessage($"✅ Terminated active connections to database '{targetDatabaseName}'", false);
+                                }
+                                catch (Exception killEx)
+                                {
+                                    LogMessage($"⚠️ Warning: Could not terminate some connections: {killEx.Message}", false);
+                                }
+
+                                // Now drop the database
+                                string dropDbQuery = $"DROP DATABASE [{targetDatabaseName}]";
+                                using (var dropCmd = new SqlCommand(dropDbQuery, connection))
+                                {
+                                    await dropCmd.ExecuteNonQueryAsync();
+                                }
+
+                                LogMessage($"✅ Target database '{targetDatabaseName}' dropped successfully", false);
+                                dbCount = 0; // Mark as non-existent so it gets created below
+                            }
+                            else
+                            {
+                                LogMessage($"🛡️ DACPAC MODE: Target database '{targetDatabaseName}' exists - preserving for schema deployment", false);
+                                LogMessage($"📊 Database will be used as-is for schema sync operation", false);
+                            }
+                        }
+                        else
+                        {
+                            LogMessage($"⚠️ Target database '{targetDatabaseName}' does not exist", false);
                         }
 
                         if (dbCount == 0)
                         {
-                            LogMessage($"Creating target database '{targetDatabaseName}'...", false);
+                            LogMessage($"🔨 Creating target database '{targetDatabaseName}'...", false);
 
                             // Create the database
                             string createDbQuery = $"CREATE DATABASE [{targetDatabaseName}]";
@@ -744,11 +785,7 @@ namespace DbCop
                                 await createCmd.ExecuteNonQueryAsync();
                             }
 
-                            LogMessage($"✅ Target database '{targetDatabaseName}' created successfully", false);
-                        }
-                        else
-                        {
-                            LogMessage($"✅ Target database '{targetDatabaseName}' already exists", false);
+                            LogMessage($"✅ Target database '{targetDatabaseName}' created successfully (empty)", false);
                         }
                     }
                 }
@@ -761,6 +798,7 @@ namespace DbCop
                 return false;
             }
         }
+
 
         private string BuildTargetServerConnectionString()
         {
@@ -842,32 +880,119 @@ namespace DbCop
 
                 LogMessage("✅ All pre-flight checks passed", false);
 
-                // Step 1: Extract source database to DACPAC
-                Dispatcher.Invoke(() => {
-                    SyncProgressBar.Value = 10;
-                    StatusBarText.Text = "Extracting source database...";
-                });
-                LogMessage("Step 1: Extracting source database to DACPAC file...", false);
-
-                bool extractSuccess = await ExecuteSqlPackageCommand(BuildExtractCommand(), cancellationToken);
-                if (!extractSuccess)
+                // Determine sync mode from radio buttons
+                string syncMode = "";
+                Dispatcher.Invoke(() =>
                 {
-                    throw new Exception("Database extraction failed. Check the error messages above for details.");
+                    if (BacpacFullCopyRadio?.IsChecked == true)
+                        syncMode = "BACPAC_FULL";
+                    else if (DacpacSafeRadio?.IsChecked == true)
+                        syncMode = "DACPAC_SAFE";
+                    else if (DacpacForceRadio?.IsChecked == true)
+                        syncMode = "DACPAC_FORCE";
+                    else
+                        syncMode = "BACPAC_FULL"; // default
+                });
+
+                if (syncMode == "BACPAC_FULL")
+                {
+                    // Full Copy Mode: Use BACPAC (Export/Import)
+                    LogMessage("🔄 FULL COPY MODE: Using BACPAC for complete database transfer", false);
+
+                    // Step 1: Export source database to BACPAC
+                    Dispatcher.Invoke(() => {
+                        SyncProgressBar.Value = 10;
+                        StatusBarText.Text = "Exporting source database to BACPAC...";
+                    });
+                    LogMessage("Step 1: Exporting source database to BACPAC file...", false);
+
+                    bool exportSuccess = await ExecuteSqlPackageCommand(BuildExportCommand(), cancellationToken);
+                    if (!exportSuccess)
+                    {
+                        throw new Exception("Database export failed. Check the error messages above for details.");
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Step 2: Import BACPAC to target database
+                    Dispatcher.Invoke(() => {
+                        SyncProgressBar.Value = 60;
+                        StatusBarText.Text = "Importing BACPAC to target database...";
+                    });
+                    LogMessage("Step 2: Importing BACPAC to target database...", false);
+
+                    bool importSuccess = await ExecuteSqlPackageCommand(BuildImportCommand(), cancellationToken);
+                    if (!importSuccess)
+                    {
+                        throw new Exception("Database import failed");
+                    }
                 }
-
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // Step 2: Publish DACPAC to target database
-                Dispatcher.Invoke(() => {
-                    SyncProgressBar.Value = 60;
-                    StatusBarText.Text = "Publishing to target database...";
-                });
-                LogMessage("Step 2: Publishing DACPAC to target database...", false);
-
-                bool publishSuccess = await ExecuteSqlPackageCommand(BuildPublishCommand(), cancellationToken);
-                if (!publishSuccess)
+                else if (syncMode == "DACPAC_SAFE")
                 {
-                    throw new Exception("Database publish failed");
+                    // Safe Schema Mode: Use DACPAC with safe parameters
+                    LogMessage("📋 SAFE SCHEMA MODE: Using DACPAC for safe schema deployment", false);
+
+                    // Step 1: Extract source database to DACPAC (schema only)
+                    Dispatcher.Invoke(() => {
+                        SyncProgressBar.Value = 10;
+                        StatusBarText.Text = "Extracting source schema to DACPAC...";
+                    });
+                    LogMessage("Step 1: Extracting source schema to DACPAC file...", false);
+
+                    bool extractSuccess = await ExecuteSqlPackageCommand(BuildExtractCommand(), cancellationToken);
+                    if (!extractSuccess)
+                    {
+                        throw new Exception("Schema extraction failed. Check the error messages above for details.");
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Step 2: Publish DACPAC to target database (safe schema deployment)
+                    Dispatcher.Invoke(() => {
+                        SyncProgressBar.Value = 60;
+                        StatusBarText.Text = "Publishing schema safely to target database...";
+                    });
+                    LogMessage("Step 2: Publishing schema safely to target database (preserving data)...", false);
+
+                    bool publishSuccess = await ExecuteSqlPackageCommand(BuildPublishCommand(false), cancellationToken);
+                    if (!publishSuccess)
+                    {
+                        throw new Exception("Safe schema publish failed");
+                    }
+                }
+                else if (syncMode == "DACPAC_FORCE")
+                {
+                    // Force Schema Mode: Use DACPAC with destructive parameters
+                    LogMessage("⚡ FORCE SCHEMA MODE: Using DACPAC for destructive schema sync", false);
+                    LogMessage("⚠️ WARNING: This mode allows data loss to force schema matching", false);
+
+                    // Step 1: Extract source database to DACPAC (schema only)
+                    Dispatcher.Invoke(() => {
+                        SyncProgressBar.Value = 10;
+                        StatusBarText.Text = "Extracting source schema to DACPAC...";
+                    });
+                    LogMessage("Step 1: Extracting source schema to DACPAC file...", false);
+
+                    bool extractSuccess = await ExecuteSqlPackageCommand(BuildExtractCommand(), cancellationToken);
+                    if (!extractSuccess)
+                    {
+                        throw new Exception("Schema extraction failed. Check the error messages above for details.");
+                    }
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Step 2: Publish DACPAC to target database (force schema match)
+                    Dispatcher.Invoke(() => {
+                        SyncProgressBar.Value = 60;
+                        StatusBarText.Text = "Force publishing schema to target database...";
+                    });
+                    LogMessage("Step 2: Force publishing schema to target database (allowing data loss)...", false);
+
+                    bool publishSuccess = await ExecuteSqlPackageCommand(BuildPublishCommand(true), cancellationToken);
+                    if (!publishSuccess)
+                    {
+                        throw new Exception("Force schema publish failed");
+                    }
                 }
 
                 Dispatcher.Invoke(() => {
@@ -897,7 +1022,7 @@ namespace DbCop
             }
         }
 
-        private string BuildExtractCommand()
+        private string BuildExportCommand()
         {
             if (SourceConnectionComboBox.SelectedItem is not DatabaseConnection sourceConnection)
             {
@@ -917,12 +1042,13 @@ namespace DbCop
                                  $"TrustServerCertificate=true;Encrypt=false;Connection Timeout=30;";
             }
 
-            // Use only valid parameters for Extract action
-            var command = $"/Action:Extract " +
+            // Build BACPAC export command (includes schema + data)
+            var command = $"/Action:Export " +
                    $"/SourceConnectionString:\"{connectionString}\" " +
-                   $"/TargetFile:\"{_tempDacpacPath}\" " +
-                   $"/p:ExtractAllTableData=true " +
+                   $"/TargetFile:\"{_tempBacpacPath}\" " +
                    $"/p:CommandTimeout=300";
+
+            LogMessage("📦 Exporting source database as BACPAC (schema + data)", false);
 
             // Log the command for debugging (without password)
             string safeConnectionString;
@@ -936,12 +1062,98 @@ namespace DbCop
                                      $"User Id={sourceConnection.UserId};Password=***;TrustServerCertificate=true;Encrypt=false;";
             }
             var safeCommand = command.Replace(connectionString, safeConnectionString);
+            LogMessage($"Export Command: {safeCommand}", false);
+
+            return command;
+        }
+
+        private string BuildImportCommand()
+        {
+            if (TargetConnectionComboBox.SelectedItem is not DatabaseConnection targetConnection)
+            {
+                throw new Exception("No target connection selected");
+            }
+
+            string targetDatabaseName = TargetDatabaseComboBox.Text;
+
+            // Build target connection string for BACPAC import
+            string targetConnectionString;
+            if (targetConnection.UseWindowsAuth)
+            {
+                targetConnectionString = $"Server={targetConnection.Server};Database={targetDatabaseName};" +
+                                $"Integrated Security=true;TrustServerCertificate=true;Encrypt=false;Connection Timeout=30;";
+            }
+            else
+            {
+                targetConnectionString = $"Server={targetConnection.Server};Database={targetDatabaseName};" +
+                                 $"User Id={targetConnection.UserId};Password={targetConnection.GetDecryptedPassword()};" +
+                                 $"TrustServerCertificate=true;Encrypt=false;Connection Timeout=30;";
+            }
+
+            // Build BACPAC import command (correct syntax from your reference)
+            var command = $"/Action:Import " +
+                   $"/SourceFile:\"{_tempBacpacPath}\" " +
+                   $"/TargetConnectionString:\"{targetConnectionString}\" " +
+                   $"/p:CommandTimeout=300";
+
+            LogMessage("📥 Importing BACPAC to target database (complete replacement)", false);
+
+            // Log the command for debugging (without password)
+            string safeConnectionString;
+            if (targetConnection.UseWindowsAuth)
+            {
+                safeConnectionString = targetConnectionString; // No password to hide
+            }
+            else
+            {
+                safeConnectionString = System.Text.RegularExpressions.Regex.Replace(targetConnectionString, @"Password=[^;]*", "Password=***");
+            }
+            var safeCommand = command.Replace(targetConnectionString, safeConnectionString);
+            LogMessage($"Import Command: {safeCommand}", false);
+
+            return command;
+        }
+
+        private string BuildExtractCommand()
+        {
+            if (SourceConnectionComboBox.SelectedItem is not DatabaseConnection sourceConnection)
+            {
+                throw new Exception("No source connection selected");
+            }
+
+            // Build DACPAC extract command (schema only) - Extract creates DACPAC, Export creates BACPAC
+            var command = $"/Action:Extract " +
+                   $"/SourceDatabaseName:{SourceDatabaseComboBox.Text} " +
+                   $"/SourceServerName:{sourceConnection.Server} " +
+                   $"/TargetFile:\"{_tempDacpacPath}\" " +
+                   $"/p:CommandTimeout=300";
+
+            // Add authentication parameters for source
+            if (!sourceConnection.UseWindowsAuth)
+            {
+                command += $" /SourceUser:{sourceConnection.UserId}";
+                command += $" /SourcePassword:{sourceConnection.GetDecryptedPassword()}";
+            }
+            command += " /SourceTrustServerCertificate:True";
+
+            LogMessage("📋 Extracting source database as DACPAC (schema only)", false);
+
+            // Log the command for debugging (without password)
+            string safeCommand;
+            if (sourceConnection.UseWindowsAuth)
+            {
+                safeCommand = command; // No password to hide
+            }
+            else
+            {
+                safeCommand = System.Text.RegularExpressions.Regex.Replace(command, @"/SourcePassword:[^\s]*", "/SourcePassword:***");
+            }
             LogMessage($"Extract Command: {safeCommand}", false);
 
             return command;
         }
 
-        private string BuildPublishCommand()
+        private string BuildPublishCommand(bool forceMode = false)
         {
             if (TargetConnectionComboBox.SelectedItem is not DatabaseConnection targetConnection)
             {
@@ -964,14 +1176,37 @@ namespace DbCop
                                  $"TrustServerCertificate=true;Encrypt=false;Connection Timeout=30;";
             }
 
-            // Use only valid parameters for Publish action - removed /TargetDatabaseName since it's in connection string
+            // Build DACPAC publish command - safe or force mode
             var command = $"/Action:Publish " +
                    $"/SourceFile:\"{_tempDacpacPath}\" " +
                    $"/TargetConnectionString:\"{targetConnectionString}\" " +
-                   $"/p:BlockOnPossibleDataLoss=false " +
-                   $"/p:CreateNewDatabase=true " +
+                   $"/p:CreateNewDatabase=false " +
                    $"/p:AllowIncompatiblePlatform=true " +
                    $"/p:CommandTimeout=300";
+
+            if (forceMode)
+            {
+                // Force Schema Mode: Allow destructive changes to match source exactly
+                command += " /p:DropObjectsNotInSource=True";
+                command += " /p:BlockOnPossibleDataLoss=False";
+
+                LogMessage("⚡ Publishing DACPAC schema with FORCE parameters (destructive)", false);
+                LogMessage("🔧 Publish parameters: DropObjectsNotInSource=True, BlockOnPossibleDataLoss=False", false);
+                LogMessage("⚠️ DESTRUCTIVE: Drops extra objects, allows data loss to force schema match", false);
+                LogMessage("📊 Expected behavior: Target schema will match source exactly, data may be lost", false);
+            }
+            else
+            {
+                // Safe Schema Mode: Preserve data and extra objects
+                command += " /p:BlockOnPossibleDataLoss=True";
+                command += " /p:DropObjectsNotInSource=False";
+                command += " /p:GenerateSmartDefaults=True";
+
+                LogMessage("📋 Publishing DACPAC schema with SAFE parameters", false);
+                LogMessage("🔧 Publish parameters: BlockOnPossibleDataLoss=True, DropObjectsNotInSource=False, GenerateSmartDefaults=True", false);
+                LogMessage("🛡️ Safe schema deployment: Stops if data loss, keeps extra objects, smart defaults for new columns", false);
+                LogMessage("📊 Expected behavior: Schema updated safely, all target data preserved", false);
+            }
 
             // Log the command for debugging (without password)
             string safeConnectionString;
@@ -1591,6 +1826,48 @@ namespace DbCop
             }
         }
 
+        private void DataHandlingInfoButton_Click(object sender, RoutedEventArgs e)
+        {
+            string infoMessage = @"🔍 Three Sync Modes Explained:
+
+📦 FULL COPY (BACPAC):
+• Export → Import actions
+• Complete replacement with schema + data
+• Target recreated from scratch
+• Use for: Development, testing, full migration
+• Result: Exact copy, all target data lost
+
+📋 SAFE SCHEMA (DACPAC):
+• Extract → Publish with safe parameters
+• BlockOnPossibleDataLoss=True, DropObjectsNotInSource=False
+• Schema updates while preserving ALL target data
+• Stops if any operation would cause data loss
+• Use for: Production, safe schema updates
+• Result: Schema updated, target data preserved
+
+⚡ FORCE SCHEMA (DACPAC):
+• Extract → Publish with destructive parameters
+• BlockOnPossibleDataLoss=False, DropObjectsNotInSource=True
+• Forces target schema to match source exactly
+• Allows data loss to achieve schema consistency
+• Use for: When schema must match regardless of data
+• Result: Schema synchronized, data may be lost
+
+🎯 WHEN TO USE:
+
+Development/Testing: BACPAC Full Copy
+Production Updates: DACPAC Safe Schema
+Schema Fixes: DACPAC Force Schema (with caution)
+
+⚠️ IMPORTANT:
+• Always backup before destructive operations
+• DACPAC Force can drop objects/data unexpectedly
+• Consider preview with /Action:Script first";
+
+            MessageBox.Show(infoMessage, "Three Sync Modes Explained", MessageBoxButton.OK, MessageBoxImage.Information);
+            LogMessage("User viewed sync modes information", false);
+        }
+
         #endregion
 
         #region Utility Methods
@@ -1634,12 +1911,25 @@ namespace DbCop
                 if (File.Exists(_tempDacpacPath))
                 {
                     File.Delete(_tempDacpacPath);
-                    LogMessage($"Cleaned up temporary file: {_tempDacpacPath}", false);
+                    LogMessage($"Cleaned up temporary DACPAC file: {_tempDacpacPath}", false);
                 }
             }
             catch (Exception ex)
             {
-                LogMessage($"Warning: Could not delete temporary file {_tempDacpacPath}: {ex.Message}", false);
+                LogMessage($"Warning: Could not delete temporary DACPAC file {_tempDacpacPath}: {ex.Message}", false);
+            }
+
+            try
+            {
+                if (File.Exists(_tempBacpacPath))
+                {
+                    File.Delete(_tempBacpacPath);
+                    LogMessage($"Cleaned up temporary BACPAC file: {_tempBacpacPath}", false);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Warning: Could not delete temporary BACPAC file {_tempBacpacPath}: {ex.Message}", false);
             }
         }
 

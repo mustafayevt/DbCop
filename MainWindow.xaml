@@ -59,7 +59,7 @@
                     <RowDefinition Height="35"/>
                     <RowDefinition Height="35"/>
                     <RowDefinition Height="35"/>
-                    <RowDefinition Height="35"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
                 <Label Grid.Row="0" Grid.Column="0" Content="Connection:" VerticalAlignment="Center"/>
@@ -81,9 +81,15 @@
                           Content="🔐 Windows Auth (from selected connection)" VerticalAlignment="Center" IsEnabled="False"
                           Checked="UseWindowsAuthCheckBox_Checked" Unchecked="UseWindowsAuthCheckBox_Unchecked"/>
 
-                <CheckBox Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="4" Name="DropTargetDatabaseCheckBox"
-                          Content="🗑️ Drop target database if exists (recreate from scratch)" VerticalAlignment="Center"
-                          ToolTip="Drop and recreate the target database for a clean sync" IsChecked="True"/>
+                <StackPanel Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="4" Orientation="Vertical">
+                    <Label Content="Sync Mode:" FontWeight="Bold" Margin="0,0,0,5"/>
+                    <RadioButton Name="BacpacFullCopyRadio" Content="📦 Full Copy (BACPAC) - Complete replacement with data"
+                                 GroupName="SyncMode" IsChecked="True" Margin="0,2"/>
+                    <RadioButton Name="DacpacSafeRadio" Content="📋 Safe Schema (DACPAC) - Preserve data, safe schema updates"
+                                 GroupName="SyncMode" Margin="0,2"/>
+                    <RadioButton Name="DacpacForceRadio" Content="⚡ Force Schema (DACPAC) - Force schema match, allow data loss"
+                                 GroupName="SyncMode" Margin="0,2"/>
+                </StackPanel>
             </Grid>
         </GroupBox>
 
@@ -111,25 +117,40 @@
                 FontWeight="Bold" FontSize="14" Background="LightBlue"/>
 
         <!-- Options Section -->
-        <GroupBox Grid.Row="4" Header="Options" Margin="0,0,0,10" Padding="10" Height="80">
+        <GroupBox Grid.Row="4" Header="Sync &amp; Data Handling Options" Margin="0,0,0,10" Padding="10" Height="120">
             <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="180"/>
-                    <ColumnDefinition Width="220"/>
-                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-                <CheckBox Grid.Column="0" Name="AutoScrollLogCheckBox" Content="📜 Auto-scroll log"
-                          VerticalAlignment="Center" IsChecked="True" FontSize="12"
-                          ToolTip="Automatically scroll to the bottom of the log"/>
+                <!-- Data Handling Options Row -->
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+                    <TextBlock Text="💡 Three sync modes: BACPAC full copy, DACPAC safe schema, DACPAC force schema"
+                               VerticalAlignment="Center" FontStyle="Italic" Margin="0,0,15,0"/>
+                    <Button Name="DataHandlingInfoButton" Content="ℹ️" Width="25" Height="25"
+                            FontSize="12" VerticalAlignment="Center"
+                            ToolTip="Click for detailed data handling information" Click="DataHandlingInfoButton_Click"
+                            Background="LightYellow"/>
+                </StackPanel>
 
-                <Button Grid.Column="1" Name="ManageConnectionsButton" Content="⚙️ Manage Connections"
-                        Height="30" Margin="0,0,10,0" Click="ManageConnectionsButton_Click"
-                        ToolTip="Add, edit, or remove saved connections" Background="LightCyan"/>
+                <!-- General Options Row -->
+                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+                    <CheckBox Name="AutoScrollLogCheckBox" Content="📜 Auto-scroll log"
+                              VerticalAlignment="Center" IsChecked="True" FontSize="12"
+                              ToolTip="Automatically scroll to the bottom of the log"/>
+                </StackPanel>
 
-                <Button Grid.Column="2" Name="OpenLogFileButton" Content="📂 Open Log File Location"
-                        Height="30" Click="OpenLogFileButton_Click"
-                        ToolTip="Open the folder containing the log file"/>
+                <!-- Action Buttons Row -->
+                <StackPanel Grid.Row="2" Orientation="Horizontal">
+                    <Button Name="ManageConnectionsButton" Content="⚙️ Manage Connections"
+                            Width="160" Height="30" Margin="0,0,10,0" Click="ManageConnectionsButton_Click"
+                            ToolTip="Add, edit, or remove saved connections" Background="LightCyan"/>
+                    <Button Name="OpenLogFileButton" Content="📂 Open Log File Location"
+                            Width="180" Height="30" Click="OpenLogFileButton_Click"
+                            ToolTip="Open the folder containing the log file"/>
+                </StackPanel>
             </Grid>
         </GroupBox>
 
