@@ -141,6 +141,9 @@
                     <CheckBox Name="AutoScrollLogCheckBox" Content="📜 Auto-scroll log"
                               VerticalAlignment="Center" IsChecked="True" FontSize="12"
                               ToolTip="Automatically scroll to the bottom of the log"/>
+                    <CheckBox Name="HandleOrphanedUsersCheckBox" Content="🔧 Handle orphaned users"
+                              VerticalAlignment="Center" FontSize="12" Margin="20,0,0,0" IsChecked="True"
+                              ToolTip="Detect orphaned users, create dummy logins, and remap users on source server to fix BACPAC export errors"/>
                 </StackPanel>
 
                 <!-- Action Buttons Row -->

@@ -71,6 +71,16 @@ namespace DbCop
     }
 
     /// <summary>
+    /// Represents an orphaned database user
+    /// </summary>
+    public class OrphanedUser
+    {
+        public string UserName { get; set; } = "";
+        public char UserType { get; set; }  // 'S' for SQL, 'U' for Windows
+        public string LoginType { get; set; } = "";
+    }
+
+    /// <summary>
     /// Interaction logic for MainWindow.xaml
     /// </summary>
     public partial class MainWindow : Window, INotifyPropertyChanged
@@ -534,6 +544,12 @@ namespace DbCop
                 return;
             }
 
+            // Show pre-sync information dialog
+            if (!ShowPreSyncInformation())
+            {
+                return; // User cancelled
+            }
+
             _isSyncing = true;
             _syncCancellationTokenSource = new CancellationTokenSource();
 
@@ -677,6 +693,94 @@ namespace DbCop
             }
 
             return true;
+        }
+
+        private bool ShowPreSyncInformation()
+        {
+            try
+            {
+                // Gather sync configuration information
+                var sourceConnection = SourceConnectionComboBox.SelectedItem as DatabaseConnection;
+                var targetConnection = TargetConnectionComboBox.SelectedItem as DatabaseConnection;
+                string sourceDatabase = SourceDatabaseComboBox.Text.Trim();
+                string targetDatabase = TargetDatabaseComboBox.Text.Trim();
+
+                string syncMode = "";
+                bool handleOrphanedUsers = HandleOrphanedUsersCheckBox?.IsChecked == true;
+
+                if (BacpacFullCopyRadio?.IsChecked == true)
+                    syncMode = "📦 BACPAC Full Copy";
+                else if (DacpacSafeRadio?.IsChecked == true)
+                    syncMode = "📋 DACPAC Safe Schema";
+                else if (DacpacForceRadio?.IsChecked == true)
+                    syncMode = "⚡ DACPAC Force Schema";
+
+                // Build information message
+                string infoMessage = $"🚀 SYNC OPERATION SUMMARY\n\n" +
+                                   $"📊 CONFIGURATION:\n" +
+                                   $"• Mode: {syncMode}\n" +
+                                   $"• Source: {sourceConnection?.Name} → {sourceDatabase}\n" +
+                                   $"• Target: {targetConnection?.Name} → {targetDatabase}\n" +
+                                   $"• Handle Orphaned Users: {(handleOrphanedUsers ? "✅ Enabled" : "❌ Disabled")}\n\n";
+
+                // Add mode-specific information
+                if (BacpacFullCopyRadio?.IsChecked == true)
+                {
+                    infoMessage += $"📦 BACPAC FULL COPY PROCESS:\n" +
+                                 $"1. Export source database to BACPAC file (schema + data)\n" +
+                                 $"2. Drop and recreate target database (if exists)\n" +
+                                 $"3. Import BACPAC to target (complete replacement)\n\n" +
+                                 $"⚠️  WARNING: All existing data in target database will be LOST!\n";
+
+                    if (handleOrphanedUsers)
+                    {
+                        infoMessage += $"🔧 ORPHANED USER HANDLING:\n" +
+                                     $"• Detect orphaned users on source database\n" +
+                                     $"• Create dummy logins on source server\n" +
+                                     $"• Remap database users to new logins\n" +
+                                     $"• Prevents BACPAC export errors\n";
+                    }
+                }
+                else if (DacpacSafeRadio?.IsChecked == true)
+                {
+                    infoMessage += $"📋 DACPAC SAFE SCHEMA PROCESS:\n" +
+                                 $"1. Extract schema from source database\n" +
+                                 $"2. Publish schema to target (safe mode)\n" +
+                                 $"3. Preserve all existing data in target\n\n" +
+                                 $"✅ SAFE: Blocks operations that would cause data loss\n";
+                }
+                else if (DacpacForceRadio?.IsChecked == true)
+                {
+                    infoMessage += $"⚡ DACPAC FORCE SCHEMA PROCESS:\n" +
+                                 $"1. Extract schema from source database\n" +
+                                 $"2. Force schema match on target (destructive)\n" +
+                                 $"3. Drop extra objects, allow data loss\n\n" +
+                                 $"⚠️  WARNING: May cause data loss to force schema matching!\n";
+                }
+
+                infoMessage += $"\n🤔 Do you want to proceed with this sync operation?";
+
+                // Show confirmation dialog
+                var result = MessageBox.Show(infoMessage, "Sync Operation Confirmation",
+                                           MessageBoxButton.YesNo, MessageBoxImage.Information,
+                                           MessageBoxResult.No);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    LogMessage("✅ User confirmed sync operation", false);
+                    return true;
+                }
+                else
+                {
+                    LogMessage("🛑 User cancelled sync operation", false);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Error showing pre-sync information: {ex.Message}", true);
+                return true; // Continue if there's an error showing the dialog
+            }
         }
 
         #endregion
@@ -924,6 +1028,25 @@ namespace DbCop
                 if (!targetServerConnected)
                 {
                     throw new Exception("Cannot connect to target server. Please check your target server connection settings.");
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Handle orphaned users if checkbox is checked and using BACPAC mode
+                bool shouldHandleOrphanedUsers = false;
+                Dispatcher.Invoke(() => {
+                    shouldHandleOrphanedUsers = HandleOrphanedUsersCheckBox?.IsChecked == true &&
+                                              BacpacFullCopyRadio?.IsChecked == true;
+                });
+
+                if (shouldHandleOrphanedUsers)
+                {
+                    LogMessage("🔧 Orphaned user handling enabled - checking for orphaned users...", false);
+                    bool orphanedUsersHandled = await HandleOrphanedUsers(cancellationToken);
+                    if (!orphanedUsersHandled)
+                    {
+                        throw new Exception("Orphaned user handling failed. Cannot proceed with BACPAC export as it will fail with orphaned user errors.");
+                    }
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
@@ -2259,6 +2382,356 @@ Schema Fixes: DACPAC Force Schema (with caution)
             
             _ = serverName; // Suppress unused parameter warning - used in future implementation
             return false;
+        }
+
+        #endregion
+
+        #region Orphaned User Handling
+
+        private async Task<bool> HandleOrphanedUsers(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                LogMessage("🔍 Detecting orphaned users on source database...", false);
+
+                // Step 1: Detect orphaned users on source
+                var orphanedUsers = await DetectOrphanedUsersOnSource(cancellationToken);
+
+                if (orphanedUsers == null || orphanedUsers.Count == 0)
+                {
+                    LogMessage("✅ No orphaned users found on source database", false);
+                    return true;
+                }
+
+                LogMessage($"⚠️ Found {orphanedUsers.Count} orphaned user(s) on source database", false);
+
+                foreach (var user in orphanedUsers)
+                {
+                    LogMessage($"  - {user.UserName} ({user.LoginType} login)", false);
+                }
+
+                // Step 2: Ask user for confirmation
+                bool userConfirmed = false;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    string userList = string.Join("\n  - ", orphanedUsers.Select(u => $"{u.UserName} ({u.LoginType} login)"));
+                    string confirmMessage = $"Found {orphanedUsers.Count} orphaned user(s) that will cause BACPAC export errors:\n\n  - {userList}\n\n" +
+                                          "Create dummy logins on SOURCE server to resolve this?\n\n" +
+                                          "Note: SQL logins will get temporary password 'TempPassword123!'";
+
+                    var result = MessageBox.Show(confirmMessage, "Orphaned Users Detected",
+                                               MessageBoxButton.YesNo, MessageBoxImage.Question,
+                                               MessageBoxResult.Yes);
+                    userConfirmed = result == MessageBoxResult.Yes;
+                });
+
+                if (!userConfirmed)
+                {
+                    LogMessage("❌ User declined to create dummy logins for orphaned users", false);
+                    return false;
+                }
+
+                // Step 3: Create dummy logins and remap users on source server (needed for BACPAC export)
+                LogMessage("🔧 Creating dummy logins and remapping users on source server...", false);
+                int successCount = 0;
+
+                foreach (var user in orphanedUsers)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    bool loginCreated = await CreateDummyLoginOnSource(user.UserName, user.UserType, cancellationToken);
+                    if (loginCreated)
+                    {
+                        // Remap the database user to the newly created login
+                        bool userRemapped = await RemapUserToLogin(user.UserName, cancellationToken);
+                        if (userRemapped)
+                        {
+                            successCount++;
+                        }
+                        else
+                        {
+                            LogMessage($"⚠️ Login created but user remapping failed for: {user.UserName}", false);
+                        }
+                    }
+                }
+
+                LogMessage($"✅ Successfully created and remapped {successCount} out of {orphanedUsers.Count} orphaned users", false);
+
+                if (successCount == orphanedUsers.Count)
+                {
+                    LogMessage("🎉 All orphaned users have been handled - BACPAC export should now succeed", false);
+                    return true;
+                }
+                else
+                {
+                    LogMessage($"⚠️ Only {successCount}/{orphanedUsers.Count} users fixed - some BACPAC export errors may still occur", false);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Error handling orphaned users: {ex.Message}", true);
+                return false;
+            }
+        }
+
+        private async Task<List<OrphanedUser>> DetectOrphanedUsersOnSource(CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                if (SourceConnectionComboBox.SelectedItem is not DatabaseConnection sourceConnection)
+                {
+                    LogMessage("❌ No source connection selected", true);
+                    return null;
+                }
+
+                string sourceDatabaseName = SourceDatabaseComboBox.Text.Trim();
+                if (string.IsNullOrEmpty(sourceDatabaseName))
+                {
+                    LogMessage("❌ No source database specified", true);
+                    return null;
+                }
+
+                // Build connection string
+                string connectionString = BuildSourceConnectionString(sourceConnection, sourceDatabaseName);
+
+                // Read and execute the detection SQL
+                string sqlFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DetectOrphanedUsers.sql");
+                string detectionSQL = await File.ReadAllTextAsync(sqlFilePath, cancellationToken);
+
+                var orphanedUsers = new List<OrphanedUser>();
+
+                using (var connection = new SqlConnection(connectionString))
+                {
+                    await connection.OpenAsync(cancellationToken);
+
+                    using (var command = new SqlCommand(detectionSQL, connection))
+                    {
+                        command.CommandTimeout = 30;
+                        using (var reader = await command.ExecuteReaderAsync(cancellationToken))
+                        {
+                            while (await reader.ReadAsync(cancellationToken))
+                            {
+                                orphanedUsers.Add(new OrphanedUser
+                                {
+                                    UserName = reader["UserName"].ToString(),
+                                    UserType = reader["UserType"].ToString()[0],
+                                    LoginType = reader["LoginType"].ToString()
+                                });
+                            }
+                        }
+                    }
+                }
+
+                return orphanedUsers;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Error detecting orphaned users: {ex.Message}", true);
+                return null;
+            }
+        }
+
+        private async Task<bool> CreateDummyLoginOnSource(string userName, char userType, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                if (SourceConnectionComboBox.SelectedItem is not DatabaseConnection sourceConnection)
+                {
+                    LogMessage("❌ No source connection selected", true);
+                    return false;
+                }
+
+                // Build connection string to master database on source server
+                string connectionString = BuildSourceServerConnectionString(sourceConnection);
+
+                // Read the login creation SQL template
+                string sqlFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CreateDummyLogins.sql");
+                string createLoginSQL = await File.ReadAllTextAsync(sqlFilePath, cancellationToken);
+
+                // Replace placeholders
+                createLoginSQL = createLoginSQL.Replace("{USER_NAME}", userName);
+                createLoginSQL = createLoginSQL.Replace("{USER_TYPE}", userType.ToString());
+
+                using (var connection = new SqlConnection(connectionString))
+                {
+                    await connection.OpenAsync(cancellationToken);
+
+                    using (var command = new SqlCommand(createLoginSQL, connection))
+                    {
+                        command.CommandTimeout = 30;
+                        await command.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                }
+
+                // Verify the login was actually created on source server
+                bool loginExists = await VerifyLoginExistsOnSource(userName, cancellationToken);
+                if (loginExists)
+                {
+                    LogMessage($"✅ Created and verified dummy login for: {userName}", false);
+                    return true;
+                }
+                else
+                {
+                    LogMessage($"❌ Login creation completed but login not found for: {userName}", true);
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Failed to create dummy login for {userName}: {ex.Message}", true);
+                return false;
+            }
+        }
+
+        private string BuildSourceConnectionString(DatabaseConnection sourceConnection, string databaseName)
+        {
+            var builder = new StringBuilder();
+            builder.Append($"Server={sourceConnection.Server};");
+            builder.Append($"Database={databaseName};");
+
+            if (sourceConnection.UseWindowsAuth)
+            {
+                builder.Append("Integrated Security=true;");
+            }
+            else
+            {
+                builder.Append($"User ID={sourceConnection.UserId};");
+                builder.Append($"Password={sourceConnection.GetDecryptedPassword()};");
+            }
+
+            builder.Append("Connection Timeout=30;");
+            builder.Append("TrustServerCertificate=true;");
+
+            return builder.ToString();
+        }
+
+        private string BuildSourceServerConnectionString(DatabaseConnection sourceConnection)
+        {
+            var builder = new StringBuilder();
+            builder.Append($"Server={sourceConnection.Server};");
+            builder.Append("Database=master;"); // Connect to master database
+
+            if (sourceConnection.UseWindowsAuth)
+            {
+                builder.Append("Integrated Security=true;");
+            }
+            else
+            {
+                builder.Append($"User ID={sourceConnection.UserId};");
+                builder.Append($"Password={sourceConnection.GetDecryptedPassword()};");
+            }
+
+            builder.Append("Connection Timeout=30;");
+            builder.Append("TrustServerCertificate=true;");
+
+            return builder.ToString();
+        }
+
+        private async Task<bool> VerifyLoginExists(string userName, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                if (TargetConnectionComboBox.SelectedItem is not DatabaseConnection targetConnection)
+                {
+                    return false;
+                }
+
+                string connectionString = BuildTargetServerConnectionString();
+
+                using (var connection = new SqlConnection(connectionString))
+                {
+                    await connection.OpenAsync(cancellationToken);
+
+                    string checkLoginSQL = "SELECT COUNT(*) FROM sys.server_principals WHERE name = @UserName";
+                    using (var command = new SqlCommand(checkLoginSQL, connection))
+                    {
+                        command.Parameters.AddWithValue("@UserName", userName);
+                        int loginCount = (int)await command.ExecuteScalarAsync(cancellationToken);
+                        return loginCount > 0;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Error verifying login existence for {userName}: {ex.Message}", true);
+                return false;
+            }
+        }
+
+        private async Task<bool> VerifyLoginExistsOnSource(string userName, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                if (SourceConnectionComboBox.SelectedItem is not DatabaseConnection sourceConnection)
+                {
+                    return false;
+                }
+
+                string connectionString = BuildSourceServerConnectionString(sourceConnection);
+
+                using (var connection = new SqlConnection(connectionString))
+                {
+                    await connection.OpenAsync(cancellationToken);
+
+                    string checkLoginSQL = "SELECT COUNT(*) FROM sys.server_principals WHERE name = @UserName";
+                    using (var command = new SqlCommand(checkLoginSQL, connection))
+                    {
+                        command.Parameters.AddWithValue("@UserName", userName);
+                        int loginCount = (int)await command.ExecuteScalarAsync(cancellationToken);
+                        return loginCount > 0;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Error verifying login existence on source for {userName}: {ex.Message}", true);
+                return false;
+            }
+        }
+
+        private async Task<bool> RemapUserToLogin(string userName, CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                if (SourceConnectionComboBox.SelectedItem is not DatabaseConnection sourceConnection)
+                {
+                    LogMessage("❌ No source connection selected for user remapping", true);
+                    return false;
+                }
+
+                string sourceDatabaseName = SourceDatabaseComboBox.Text.Trim();
+                if (string.IsNullOrEmpty(sourceDatabaseName))
+                {
+                    LogMessage("❌ No source database specified for user remapping", true);
+                    return false;
+                }
+
+                // Build connection string to source database (not master)
+                string connectionString = BuildSourceConnectionString(sourceConnection, sourceDatabaseName);
+
+                using (var connection = new SqlConnection(connectionString))
+                {
+                    await connection.OpenAsync(cancellationToken);
+
+                    // Remap the user to the login with matching name
+                    string remapSQL = $"ALTER USER [{userName}] WITH LOGIN = [{userName}]";
+
+                    using (var command = new SqlCommand(remapSQL, connection))
+                    {
+                        command.CommandTimeout = 30;
+                        await command.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                }
+
+                LogMessage($"✅ Remapped database user [{userName}] to login [{userName}]", false);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"❌ Failed to remap user {userName}: {ex.Message}", true);
+                return false;
+            }
         }
 
         #endregion
