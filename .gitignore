@@ -482,3 +482,22 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# AI Assistant files
+.claude/
+
+# Build outputs
+bin/
+obj/
+
+# Release artifacts
+release/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# VS/Rider files
+.vs/
+.idea/
