@@ -24,7 +24,14 @@
     <Company>DbCop Team</Company>
     <Product>DbCop - Database Synchronization Tool</Product>
     <Copyright>Copyright © 2025</Copyright>
+    
+    <!-- Application Icon -->
+    <ApplicationIcon>DbCop.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="DbCop.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
