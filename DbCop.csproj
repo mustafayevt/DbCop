@@ -7,8 +7,8 @@
     <Nullable>enable</Nullable>
     <AssemblyTitle>DbCop</AssemblyTitle>
     <AssemblyDescription>Database synchronization tool with GUI for SqlPackage.exe</AssemblyDescription>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     
     <!-- Single File Deployment Configuration -->
     <PublishSingleFile>true</PublishSingleFile>
